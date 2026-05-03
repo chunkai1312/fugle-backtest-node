@@ -1,15 +1,14 @@
-import { DataFrame } from 'danfojs-node';
 import { sumBy } from 'lodash';
+import { HistoricalData } from '../src/historical-data';
 import { Broker } from '../src/broker';
 import { Order } from '../src/order';
 import { Trade } from '../src/trade';
 
 describe('Broker', () => {
-  let data: DataFrame;
+  let data: HistoricalData;
 
   beforeEach(() => {
-    data = new DataFrame(require('./fixtures/2330.json'));
-    data.setIndex({ index: data['date'].values, column: 'date', drop: true, inplace: true });
+    data = new HistoricalData(require('./fixtures/2330.json'));
   });
 
   afterEach(() => {
@@ -68,7 +67,7 @@ describe('Broker', () => {
   });
 
   describe('.index', () => {
-    it('should return the data index', () => {
+    it('should return the data index (date column)', () => {
       const options = {
         cash: 10000,
         commission: 0,
@@ -78,7 +77,7 @@ describe('Broker', () => {
         exclusiveOrders: false,
       };
       const broker = new Broker(data, options);
-      expect(broker.index).toBe(data.index);
+      expect(broker.index).toBe(data.date);
     });
   });
 
@@ -93,13 +92,13 @@ describe('Broker', () => {
         exclusiveOrders: false,
       };
       const broker = new Broker(data, options);
-      expect(broker.lastPrice).toBe(data['close'].iat(0));
+      expect(broker.lastPrice).toBe(data.close[0]);
 
       broker.next();
-      expect(broker.lastPrice).toBe(data['close'].iat(1));
+      expect(broker.lastPrice).toBe(data.close[1]);
 
       broker.last();
-      expect(broker.lastPrice).toBe(data['close'].iat(broker.index.length - 1));
+      expect(broker.lastPrice).toBe(data.close[broker.index.length - 1]);
     });
   });
 
@@ -168,6 +167,72 @@ describe('Broker', () => {
         limitPrice: 10,
         tpPrice: 5,
       })).toThrowError();
+    });
+
+    it('should throw when long stop-only order has SL above stop', () => {
+      const broker = new Broker(data, {
+        cash: 10000,
+        commission: 0,
+        margin: 1,
+        tradeOnClose: false,
+        hedging: false,
+        exclusiveOrders: false,
+      });
+      expect(() => broker.newOrder({
+        size: 10,
+        stopPrice: 100,
+        slPrice: 110,
+      })).toThrow(RangeError);
+    });
+
+    it('should throw when long market order has SL above adjusted price', () => {
+      const broker = new Broker(data, {
+        cash: 10000,
+        commission: 0,
+        margin: 1,
+        tradeOnClose: false,
+        hedging: false,
+        exclusiveOrders: false,
+      });
+      // No limit, no stop, no slPrice: market price = data.close[0] (~448.5).
+      // Force SL > price to trip the validation.
+      expect(() => broker.newOrder({
+        size: 10,
+        slPrice: 1e6,
+      })).toThrow(RangeError);
+    });
+
+    it('should throw when short stop-only order has TP above stop', () => {
+      const broker = new Broker(data, {
+        cash: 10000,
+        commission: 0,
+        margin: 1,
+        tradeOnClose: false,
+        hedging: false,
+        exclusiveOrders: false,
+      });
+      // For short: tpPrice < entry < slPrice. Force tpPrice > stopPrice to violate.
+      expect(() => broker.newOrder({
+        size: -10,
+        stopPrice: 100,
+        tpPrice: 110,
+      })).toThrow(RangeError);
+    });
+
+    it('should throw when short market order has TP above adjusted price', () => {
+      const broker = new Broker(data, {
+        cash: 10000,
+        commission: 0,
+        margin: 1,
+        tradeOnClose: false,
+        hedging: false,
+        exclusiveOrders: false,
+      });
+      // No limit / stop. Force tpPrice above the market price (~448.5) to violate.
+      expect(() => broker.newOrder({
+        size: -10,
+        tpPrice: 1e6,
+      })).toThrow(RangeError);
     });
 
     it('should throw error if short order do not meet range limits', () => {
@@ -400,6 +465,197 @@ describe('Broker', () => {
       expect(broker.orders.length).toBe(1);
       broker.next();
       expect(broker.orders.length).toBe(0);
+    });
+  });
+
+  describe('trailing stop', () => {
+    const baseOptions = {
+      cash: 10000,
+      commission: 0,
+      margin: 1,
+      tradeOnClose: false,
+      hedging: false,
+      exclusiveOrders: false,
+    };
+
+    const buildBars = (bars: Array<{ high: number; low: number }>) =>
+      new HistoricalData(bars.map((b, i) => ({
+        date: new Date(2023, 0, i + 1).toISOString().slice(0, 10),
+        open: b.high,
+        high: b.high,
+        low: b.low,
+        close: b.high,
+        volume: 0,
+      })));
+
+    it('long trailing-percent ratchets SL up but never down', () => {
+      data = buildBars([
+        { high: 100, low: 100 },
+        { high: 105, low: 104 },
+        { high: 110, low: 105 },
+        { high: 108, low: 106 },
+      ]);
+      const broker = new Broker(data, baseOptions);
+      const trade = new Trade(broker, { size: 10, entryPrice: 100, entryBar: 0, trailPercent: 0.05 });
+      broker.trades = [trade];
+
+      broker.next();
+      expect(trade.slOrder?.stop).toBeCloseTo(95, 6);
+      broker.next();
+      expect(trade.slOrder?.stop).toBeCloseTo(99.75, 6);
+      broker.next();
+      expect(trade.slOrder?.stop).toBeCloseTo(104.5, 6);
+      broker.next();
+      expect(trade.slOrder?.stop).toBeCloseTo(104.5, 6);
+      expect(broker.closedTrades.length).toBe(0);
+    });
+
+    it('short trailing-percent ratchets SL down but never up', () => {
+      // Highs must stay below the tightened SL each bar to avoid stopping out
+      data = buildBars([
+        { high: 100, low: 100 },
+        { high: 99, low: 95 },
+        { high: 94, low: 90 },
+        { high: 94, low: 92 },
+      ]);
+      const broker = new Broker(data, baseOptions);
+      const trade = new Trade(broker, { size: -10, entryPrice: 100, entryBar: 0, trailPercent: 0.05 });
+      broker.trades = [trade];
+
+      broker.next();
+      expect(trade.slOrder?.stop).toBeCloseTo(105, 6);
+      broker.next();
+      expect(trade.slOrder?.stop).toBeCloseTo(99.75, 6);
+      broker.next();
+      expect(trade.slOrder?.stop).toBeCloseTo(94.5, 6);
+      broker.next();
+      expect(trade.slOrder?.stop).toBeCloseTo(94.5, 6);
+      expect(broker.closedTrades.length).toBe(0);
+    });
+
+    it('long trailing-amount uses fixed price-unit distance', () => {
+      data = buildBars([
+        { high: 100, low: 100 },
+        { high: 110, low: 105 },
+        { high: 115, low: 111 },
+      ]);
+      const broker = new Broker(data, baseOptions);
+      const trade = new Trade(broker, { size: 10, entryPrice: 100, entryBar: 0, trailAmount: 5 });
+      broker.trades = [trade];
+
+      broker.next();
+      expect(trade.slOrder?.stop).toBe(95);
+      broker.next();
+      expect(trade.slOrder?.stop).toBe(105);
+      broker.next();
+      expect(trade.slOrder?.stop).toBe(110);
+    });
+
+    it('closes the trade when low pierces the trailing SL', () => {
+      data = buildBars([
+        { high: 100, low: 100 },
+        { high: 110, low: 105 },
+        { high: 110, low: 100 },
+      ]);
+      const broker = new Broker(data, baseOptions);
+      const trade = new Trade(broker, { size: 10, entryPrice: 100, entryBar: 0, trailPercent: 0.05 });
+      broker.trades = [trade];
+
+      broker.next();
+      broker.next();
+      // bar 2: peakHigh stays 110, SL = 104.5; low = 100 < 104.5 → hit
+      broker.next();
+      expect(broker.closedTrades.length).toBe(1);
+      expect(broker.closedTrades[0].exitPrice).toBeCloseTo(104.5, 6);
+    });
+
+    it('combined fixed sl and trail uses the more favorable price as initial SL', () => {
+      // long: max(95, 100*0.95)=95; bar 1 ratchets to 110*0.95=104.5
+      data = buildBars([
+        { high: 100, low: 100 },
+        { high: 110, low: 105 },
+      ]);
+      const broker = new Broker(data, baseOptions);
+      // openTrade is private; emulate by routing through broker.newOrder in next call
+      broker.newOrder({ size: 10, slPrice: 95, trailPercent: 0.05 });
+      broker.next();
+      expect(broker.trades.length).toBe(1);
+      const trade = broker.trades[0];
+      expect(trade.isTrailing).toBe(true);
+      // After bar 0 fill, updateTrailingStops did not run on the entry bar via
+      // initial SL setup; first ratchet happens on next bar.
+      broker.next();
+      expect(trade.slOrder?.stop).toBeCloseTo(104.5, 6);
+    });
+
+    it('assigning fixed sl mid-trade stops further trailing updates', () => {
+      data = buildBars([
+        { high: 100, low: 100 },
+        { high: 110, low: 105 },
+        { high: 120, low: 115 },
+      ]);
+      const broker = new Broker(data, baseOptions);
+      const trade = new Trade(broker, { size: 10, entryPrice: 100, entryBar: 0, trailPercent: 0.05 });
+      broker.trades = [trade];
+
+      broker.next();
+      broker.next();
+      expect(trade.slOrder?.stop).toBeCloseTo(104.5, 6);
+      // pin SL: subsequent bar should NOT ratchet beyond this
+      trade.sl = 100;
+      expect(trade.isTrailing).toBe(false);
+      broker.next();
+      expect(trade.slOrder?.stop).toBe(100);
+    });
+
+    it('openTrade path: pure trailing without sl creates initial SL on next bar', () => {
+      data = buildBars([
+        { high: 100, low: 100 },
+        { high: 110, low: 105 },
+      ]);
+      const broker = new Broker(data, baseOptions);
+      broker.newOrder({ size: 10, trailPercent: 0.05 });
+      broker.next();
+      expect(broker.trades.length).toBe(1);
+      const trade = broker.trades[0];
+      expect(trade.isTrailing).toBe(true);
+      // Initial SL set during openTrade fill at entry price 100 → 95
+      expect(trade.slOrder?.stop).toBeCloseTo(95, 6);
+      broker.next();
+      // Bar 1: peakHigh = 110 → SL = 104.5
+      expect(trade.slOrder?.stop).toBeCloseTo(104.5, 6);
+    });
+
+    it('openTrade path: short with sl + trailing picks more favorable initial SL', () => {
+      data = buildBars([
+        { high: 100, low: 100 },
+        { high: 100, low: 95 },
+      ]);
+      const broker = new Broker(data, baseOptions);
+      // Short with slPrice=110 and trailPercent=0.05 → initial SL = min(110, 100*1.05) = 105
+      broker.newOrder({ size: -10, slPrice: 110, trailPercent: 0.05 });
+      broker.next();
+      const trade = broker.trades[0];
+      expect(trade.isTrailing).toBe(true);
+      expect(trade.slOrder?.stop).toBeCloseTo(105, 6);
+    });
+
+    it('replace({ trailPercent }) mid-trade tightens the next bar update', () => {
+      data = buildBars([
+        { high: 100, low: 100 },
+        { high: 120, low: 115 },
+        { high: 120, low: 115 },
+      ]);
+      const broker = new Broker(data, baseOptions);
+      const trade = new Trade(broker, { size: 10, entryPrice: 100, entryBar: 0, trailPercent: 0.10 });
+      broker.trades = [trade];
+
+      broker.next();
+      broker.next();
+      expect(trade.slOrder?.stop).toBeCloseTo(108, 6); // 120 * 0.90
+      trade.replace({ trailPercent: 0.05 });
+      broker.next();
+      expect(trade.slOrder?.stop).toBeCloseTo(114, 6); // 120 * 0.95
     });
   });
 

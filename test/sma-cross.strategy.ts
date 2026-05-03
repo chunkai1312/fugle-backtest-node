@@ -1,5 +1,5 @@
-import { Strategy, Context } from '../src';
-import { SMA, CrossUp, CrossDown } from 'technicalindicators';
+import { Strategy, Context, crossover, crossunder } from '../src';
+import { SMA } from 'technicalindicators';
 
 export class SmaCross extends Strategy {
   params = { n1: 20, n2: 60 };
@@ -7,27 +7,20 @@ export class SmaCross extends Strategy {
   init() {
     const lineA = SMA.calculate({
       period: this.params.n1,
-      values: this.data['close'].values,
+      values: this.data['close'],
     });
-    this.addIndicator('lineA', lineA);
+    this.addIndicator('lineA', lineA, { overlay: true, color: '#1f77b4' });
 
     const lineB = SMA.calculate({
       period: this.params.n2,
-      values: this.data['close'].values,
+      values: this.data['close'],
     });
-    this.addIndicator('lineB', lineB);
+    this.addIndicator('lineB', lineB, { overlay: true, color: '#ff7f0e' });
 
-    const crossUp = CrossUp.calculate({
-      lineA: this.getIndicator('lineA') as number[],
-      lineB: this.getIndicator('lineB') as number[],
-    });
-    this.addSignal('crossUp', crossUp);
-
-    const crossDown = CrossDown.calculate({
-      lineA: this.getIndicator('lineA') as number[],
-      lineB: this.getIndicator('lineB') as number[],
-    });
-    this.addSignal('crossDown', crossDown);
+    const a = this.getIndicator('lineA') as number[];
+    const b = this.getIndicator('lineB') as number[];
+    this.addSignal('crossUp', crossover(a, b));
+    this.addSignal('crossDown', crossunder(a, b));
   }
 
   next(ctx: Context) {

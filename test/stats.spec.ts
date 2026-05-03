@@ -1,22 +1,21 @@
-import { DataFrame, Series } from 'danfojs-node';
+import { HistoricalData } from '../src/historical-data';
 import { Broker } from '../src/broker';
 import { Strategy } from '../src/strategy';
 import { Stats } from '../src/stats';
 import { Plotting } from '../src/plotting';
 import { Trade } from '../src/trade';
+import { StatsIndex } from '../src/enums';
 import { SmaCross } from './sma-cross.strategy';
 
 describe('Stats', () => {
-  let data: DataFrame;
+  let data: HistoricalData;
   let broker: Broker;
   let strategy: Strategy;
-  let equity: Series;
+  let equity: number[];
   let trades: Trade[];
 
   beforeEach(() => {
-    data = new DataFrame(require('./fixtures/2330.json'));
-    data.setIndex({ index: data['date'].values, column: 'date', drop: true, inplace: true });
-    strategy = new SmaCross(data, broker);
+    data = new HistoricalData(require('./fixtures/2330.json'));
     broker = new Broker(data, {
       cash: 10000,
       commission: 0,
@@ -26,7 +25,7 @@ describe('Stats', () => {
       exclusiveOrders: false,
     });
     strategy = new SmaCross(data, broker);
-    equity = new Series(Array(data.index.length).fill(10000));
+    equity = Array(data.length).fill(10000);
     trades = [new Trade(broker, { size: 10, entryPrice: 100, entryBar: 0, exitPrice: 110, exitBar: 1 })];
   });
 
@@ -54,9 +53,10 @@ describe('Stats', () => {
     it('should print the results', () => {
       const stats = new Stats(data, strategy, equity, trades, { riskFreeRate: 0 });
       stats.compute();
-      Series.prototype.print = jest.fn();;
+      const tableSpy = jest.spyOn(console, 'table').mockImplementation(() => undefined);
       stats.print();
-      expect(stats.results?.print).toBeCalled();
+      expect(tableSpy).toBeCalledWith(stats.results);
+      tableSpy.mockRestore();
     });
 
     it('should throw error when missing results', () => {
@@ -81,6 +81,75 @@ describe('Stats', () => {
         const stats = new Stats(data, strategy, equity, trades, { riskFreeRate: 0 });
         stats.plot();
       }).toThrow(Error);
+    });
+  });
+
+  describe('Kelly and trade aggregates', () => {
+    const buildTrades = (specs: Array<{ size: number; entry: number; exit: number; bar: number }>): Trade[] =>
+      specs.map(s => new Trade(broker, {
+        size: s.size,
+        entryPrice: s.entry,
+        entryBar: s.bar,
+        exitPrice: s.exit,
+        exitBar: s.bar + 1,
+      }));
+
+    const computeResults = (forTrades: Trade[]) => {
+      const results = new Stats(data, strategy, equity, forTrades, { riskFreeRate: 0 })
+        .compute()
+        .results;
+      if (!results) throw new Error('expected results');
+      return results;
+    };
+
+    it('computes Kelly Criterion for mixed wins and losses', () => {
+      const winning = Array(4).fill(0).map((_, i) => ({ size: 10, entry: 100, exit: 105, bar: i }));
+      const losing = Array(2).fill(0).map((_, i) => ({ size: 10, entry: 100, exit: 97.5, bar: i + 4 }));
+      const results = computeResults(buildTrades([...winning, ...losing]));
+
+      expect(results[StatsIndex.AvgWinPct]).toBeCloseTo(5, 6);
+      expect(results[StatsIndex.AvgLossPct]).toBeCloseTo(-2.5, 6);
+      expect(results[StatsIndex.WinLossRatio]).toBeCloseTo(2, 6);
+      expect(results[StatsIndex.KellyCriterion]).toBeCloseTo(0.5, 6);
+    });
+
+    it('all-wins sets Kelly to win rate, ratio to Infinity, AvgLoss to 0', () => {
+      const allWins = buildTrades(Array(3).fill(0).map((_, i) => ({ size: 10, entry: 100, exit: 110, bar: i })));
+      const results = computeResults(allWins);
+
+      expect(results[StatsIndex.AvgLossPct]).toBe(0);
+      expect(results[StatsIndex.WinLossRatio]).toBe(Infinity);
+      expect(results[StatsIndex.KellyCriterion]).toBeCloseTo(1, 6);
+    });
+
+    it('all-losses sets Kelly to 0, ratio to 0, AvgWin to 0', () => {
+      const allLosses = buildTrades(Array(3).fill(0).map((_, i) => ({ size: 10, entry: 100, exit: 90, bar: i })));
+      const results = computeResults(allLosses);
+
+      expect(results[StatsIndex.AvgWinPct]).toBe(0);
+      expect(results[StatsIndex.WinLossRatio]).toBe(0);
+      expect(results[StatsIndex.KellyCriterion]).toBe(0);
+    });
+
+    it('no trades sets all four new keys to NaN', () => {
+      const results = computeResults([]);
+
+      expect(results[StatsIndex.AvgWinPct]).toBeNaN();
+      expect(results[StatsIndex.AvgLossPct]).toBeNaN();
+      expect(results[StatsIndex.WinLossRatio]).toBeNaN();
+      expect(results[StatsIndex.KellyCriterion]).toBeNaN();
+    });
+
+    it('the four new keys are placed after SQN in insertion order', () => {
+      const results = computeResults(trades);
+      const keys = Object.keys(results);
+      const sqnIdx = keys.indexOf(StatsIndex.SQN);
+      expect(keys.slice(sqnIdx + 1, sqnIdx + 5)).toEqual([
+        StatsIndex.AvgWinPct,
+        StatsIndex.AvgLossPct,
+        StatsIndex.WinLossRatio,
+        StatsIndex.KellyCriterion,
+      ]);
     });
   });
 });

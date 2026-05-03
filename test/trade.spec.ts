@@ -1,14 +1,14 @@
-import { DataFrame } from 'danfojs-node';
+import { HistoricalData } from '../src/historical-data';
 import { Broker } from '../src/broker';
 import { Order } from '../src/order';
 import { Trade } from '../src/trade';
 
 describe('Trade', () => {
-  let data: DataFrame;
+  let data: HistoricalData;
   let broker: Broker;
 
   beforeEach(() => {
-    data = new DataFrame(require('./fixtures/2330.json'));
+    data = new HistoricalData(require('./fixtures/2330.json'));
     broker = new Broker(data, {
       cash: 10000,
       commission: 0,
@@ -357,6 +357,119 @@ describe('Trade', () => {
       expect(trade.tag).toBe(options.tag);
       trade.replace(newOptions);
       expect(trade.tag).toBe(newOptions.tag);
+    });
+  });
+
+  describe('trailing stop', () => {
+    it('isTrailing is false for fixed-SL trade', () => {
+      const trade = new Trade(broker, { size: 10, entryPrice: 100, entryBar: 0 });
+      expect(trade.isTrailing).toBe(false);
+    });
+
+    it('isTrailing is true when constructed with trailPercent', () => {
+      const trade = new Trade(broker, { size: 10, entryPrice: 100, entryBar: 0, trailPercent: 0.05 });
+      expect(trade.isTrailing).toBe(true);
+      expect(trade.trailPercent).toBe(0.05);
+      expect(trade.trailAmount).toBeUndefined();
+    });
+
+    it('isTrailing is true when constructed with trailAmount', () => {
+      const trade = new Trade(broker, { size: 10, entryPrice: 100, entryBar: 0, trailAmount: 5 });
+      expect(trade.isTrailing).toBe(true);
+      expect(trade.trailAmount).toBe(5);
+    });
+
+    it('updateTrailingPeak ratchets long peakHigh upward only', () => {
+      const trade = new Trade(broker, { size: 10, entryPrice: 100, entryBar: 0, trailPercent: 0.05 });
+      trade.updateTrailingPeak(105, 99);
+      expect(trade.computeTrailingSL()).toBeCloseTo(105 * 0.95, 6);
+      // lower high should NOT lower peak
+      trade.updateTrailingPeak(103, 100);
+      expect(trade.computeTrailingSL()).toBeCloseTo(105 * 0.95, 6);
+    });
+
+    it('updateTrailingPeak ratchets short peakLow downward only', () => {
+      const trade = new Trade(broker, { size: -10, entryPrice: 100, entryBar: 0, trailPercent: 0.05 });
+      trade.updateTrailingPeak(101, 95);
+      expect(trade.computeTrailingSL()).toBeCloseTo(95 * 1.05, 6);
+      // higher low should NOT raise peak
+      trade.updateTrailingPeak(102, 97);
+      expect(trade.computeTrailingSL()).toBeCloseTo(95 * 1.05, 6);
+    });
+
+    it('computeTrailingSL uses trailAmount for long', () => {
+      const trade = new Trade(broker, { size: 10, entryPrice: 100, entryBar: 0, trailAmount: 5 });
+      trade.updateTrailingPeak(110, 100);
+      expect(trade.computeTrailingSL()).toBe(105);
+    });
+
+    it('computeTrailingSL uses trailAmount for short', () => {
+      const trade = new Trade(broker, { size: -10, entryPrice: 100, entryBar: 0, trailAmount: 5 });
+      trade.updateTrailingPeak(100, 90);
+      expect(trade.computeTrailingSL()).toBe(95);
+    });
+
+    it('updateTrailingPeak / computeTrailingSL are no-ops when not trailing', () => {
+      const trade = new Trade(broker, { size: 10, entryPrice: 100, entryBar: 0 });
+      trade.updateTrailingPeak(105, 99);
+      expect(trade.computeTrailingSL()).toBeUndefined();
+    });
+
+    it('replace({ trailPercent }) tightens trailing parameters mid-trade', () => {
+      const trade = new Trade(broker, { size: 10, entryPrice: 100, entryBar: 0, trailPercent: 0.10 });
+      trade.updateTrailingPeak(120, 100);
+      expect(trade.computeTrailingSL()).toBeCloseTo(120 * 0.90, 6);
+      trade.replace({ trailPercent: 0.05 });
+      expect(trade.computeTrailingSL()).toBeCloseTo(120 * 0.95, 6);
+      expect(trade.trailAmount).toBeUndefined();
+    });
+
+    it('replace({ trailAmount }) on non-trailing trade enables trailing from current entry price', () => {
+      const trade = new Trade(broker, { size: 10, entryPrice: 100, entryBar: 0 });
+      expect(trade.isTrailing).toBe(false);
+      trade.replace({ trailAmount: 4 });
+      expect(trade.isTrailing).toBe(true);
+      expect(trade.computeTrailingSL()).toBe(96);
+    });
+
+    it('replace({ trailPercent }) on non-trailing trade enables trailing from current entry price', () => {
+      const trade = new Trade(broker, { size: 10, entryPrice: 100, entryBar: 0 });
+      expect(trade.isTrailing).toBe(false);
+      trade.replace({ trailPercent: 0.05 });
+      expect(trade.isTrailing).toBe(true);
+      expect(trade.computeTrailingSL()).toBeCloseTo(95, 6);
+    });
+
+    it('trailingDistance reports correctly on a short trade', () => {
+      const trade = new Trade(broker, { size: -10, entryPrice: 100, entryBar: 0, trailPercent: 0.05 });
+      trade.updateTrailingPeak(100, 90);
+      // peakLow = 90, trailing SL = 90 * 1.05 = 94.5; distance = |90 - 94.5| = 4.5
+      trade.applyTrailingSL(90 * 1.05);
+      expect(trade.trailingDistance).toBeCloseTo(4.5, 6);
+    });
+
+    it('assigning fixed sl disables trailing', () => {
+      const trade = new Trade(broker, { size: 10, entryPrice: 100, entryBar: 0, trailPercent: 0.05 });
+      trade.updateTrailingPeak(110, 100);
+      trade.sl = 95;
+      expect(trade.isTrailing).toBe(false);
+      expect(trade.trailPercent).toBeUndefined();
+      expect(trade.computeTrailingSL()).toBeUndefined();
+    });
+
+    it('trailingDistance reports peak-to-SL absolute distance after applyTrailingSL', () => {
+      const trade = new Trade(broker, { size: 10, entryPrice: 100, entryBar: 0, trailPercent: 0.05 });
+      trade.updateTrailingPeak(110, 100);
+      // simulate broker setting up the SL at the trailing level
+      trade.applyTrailingSL(110 * 0.95);
+      expect(trade.trailingDistance).toBeCloseTo(5.5, 6);
+    });
+
+    it('trailingDistance is undefined when not trailing or no SL set', () => {
+      const fixed = new Trade(broker, { size: 10, entryPrice: 100, entryBar: 0 });
+      expect(fixed.trailingDistance).toBeUndefined();
+      const trailingNoSL = new Trade(broker, { size: 10, entryPrice: 100, entryBar: 0, trailPercent: 0.05 });
+      expect(trailingNoSL.trailingDistance).toBeUndefined();
     });
   });
 

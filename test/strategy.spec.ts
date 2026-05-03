@@ -1,16 +1,15 @@
-import { DataFrame } from 'danfojs-node';
+import { HistoricalData } from '../src/historical-data';
 import { Strategy } from '../src/strategy';
 import { Broker } from '../src/broker';
 import { SmaCross } from './sma-cross.strategy';
 
 describe('Strategy', () => {
   let strategy: Strategy;
-  let data: DataFrame;
+  let data: HistoricalData;
   let broker: Broker;
 
   beforeEach(() => {
-    data = new DataFrame(require('./fixtures/2330.json'));
-    data.setIndex({ index: data['date'].values, column: 'date', drop: true, inplace: true });
+    data = new HistoricalData(require('./fixtures/2330.json'));
     broker = new Broker(data, {
       cash: 10000,
       commission: 0,
@@ -119,7 +118,7 @@ describe('Strategy', () => {
   describe('.addIndicator()', () => {
     it('should add an indicator with the name and values', () => {
       const name = 'I';
-      const values = Array(strategy.data.index.length).fill(1);
+      const values = Array(strategy.data.length).fill(1);
       strategy.addIndicator(name, values);
       expect(strategy.indicators[name]).toEqual(values);
     });
@@ -128,15 +127,36 @@ describe('Strategy', () => {
       const name = 'I';
       const values = [1, 2, 3];
       strategy.addIndicator(name, values);
-      const paded = Array(strategy.data.index.length - values.length).fill(null).concat(values);
+      const paded = Array(strategy.data.length - values.length).fill(null).concat(values);
       expect(strategy.indicators[name]).toEqual(paded);
+    });
+
+    it('should default plotting options to overlay=true and empty color', () => {
+      strategy.addIndicator('I', Array(strategy.data.length).fill(1));
+      expect(strategy.getIndicatorOptions('I')).toEqual({ overlay: true, color: '' });
+    });
+
+    it('should accept overlay:false to mark the indicator as a subplot', () => {
+      strategy.addIndicator('RSI', Array(strategy.data.length).fill(50), { overlay: false });
+      expect(strategy.getIndicatorOptions('RSI')).toEqual({ overlay: false, color: '' });
+    });
+
+    it('should accept a color option', () => {
+      strategy.addIndicator('SMA', Array(strategy.data.length).fill(1), { color: '#1f77b4' });
+      expect(strategy.getIndicatorOptions('SMA')).toEqual({ overlay: true, color: '#1f77b4' });
+    });
+  });
+
+  describe('.getIndicatorOptions()', () => {
+    it('returns undefined for an unknown indicator', () => {
+      expect(strategy.getIndicatorOptions('unknown')).toBeUndefined();
     });
   });
 
   describe('.getIndicator()', () => {
     it('should return the indicator', () => {
       const name = 'I';
-      const values = Array(strategy.data.index.length).fill(1);
+      const values = Array(strategy.data.length).fill(1);
       strategy.addIndicator(name, values);
       expect(strategy.getIndicator(name)).toEqual(values);
     });
@@ -149,7 +169,7 @@ describe('Strategy', () => {
   describe('.addSignal()', () => {
     it('should add a signal with the name and values', () => {
       const name = 'S';
-      const values = Array(strategy.data.index.length).fill(true);
+      const values = Array(strategy.data.length).fill(true);
       strategy.addSignal(name, values);
       expect(strategy.signals[name]).toEqual(values);
     });
@@ -158,7 +178,7 @@ describe('Strategy', () => {
       const name = 'S';
       const values = [true, true, true];
       strategy.addSignal(name, values);
-      const paded = Array(strategy.data.index.length - values.length).fill(null).concat(values);
+      const paded = Array(strategy.data.length - values.length).fill(null).concat(values);
       expect(strategy.signals[name]).toEqual(paded);
     });
   });
@@ -166,7 +186,7 @@ describe('Strategy', () => {
   describe('.getSignal()', () => {
     it('should return the signal', () => {
       const name = 'S';
-      const values = Array(strategy.data.index.length).fill(true);
+      const values = Array(strategy.data.length).fill(true);
       strategy.addSignal(name, values);
       expect(strategy.getSignal(name)).toEqual(values);
     });

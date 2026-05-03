@@ -1,14 +1,14 @@
-import { DataFrame } from 'danfojs-node';
+import { HistoricalData } from '../src/historical-data';
 import { Broker } from '../src/broker';
 import { Order } from '../src/order';
 import { Trade } from '../src/trade';
 
 describe('Order', () => {
-  let data: DataFrame;
+  let data: HistoricalData;
   let broker: Broker;
 
   beforeEach(() => {
-    data = new DataFrame(require('./fixtures/2330.json'));
+    data = new HistoricalData(require('./fixtures/2330.json'));
     broker = new Broker(data, {
       cash: 10000,
       commission: 0,
@@ -29,6 +29,34 @@ describe('Order', () => {
     it('should throw an error if options.size is zero', () => {
       const options = { size: 0 };
       expect(() => new Order(broker, options)).toThrow();
+    });
+
+    it('should throw TypeError when trailPercent and trailAmount are both supplied', () => {
+      expect(() => new Order(broker, { size: 1, trailPercent: 0.05, trailAmount: 5 })).toThrow(TypeError);
+    });
+
+    it('should throw RangeError for non-positive trailPercent', () => {
+      expect(() => new Order(broker, { size: 1, trailPercent: 0 })).toThrow(RangeError);
+      expect(() => new Order(broker, { size: 1, trailPercent: -0.05 })).toThrow(RangeError);
+    });
+
+    it('should throw RangeError when trailPercent >= 1', () => {
+      expect(() => new Order(broker, { size: 1, trailPercent: 1 })).toThrow(RangeError);
+      expect(() => new Order(broker, { size: 1, trailPercent: 1.5 })).toThrow(RangeError);
+    });
+
+    it('should throw RangeError for non-positive trailAmount', () => {
+      expect(() => new Order(broker, { size: 1, trailAmount: 0 })).toThrow(RangeError);
+      expect(() => new Order(broker, { size: 1, trailAmount: -5 })).toThrow(RangeError);
+    });
+
+    it('should expose trailPercent and trailAmount via getters', () => {
+      const a = new Order(broker, { size: 1, trailPercent: 0.05 });
+      expect(a.trailPercent).toBe(0.05);
+      expect(a.trailAmount).toBeUndefined();
+      const b = new Order(broker, { size: 1, trailAmount: 5 });
+      expect(b.trailPercent).toBeUndefined();
+      expect(b.trailAmount).toBe(5);
     });
   });
 

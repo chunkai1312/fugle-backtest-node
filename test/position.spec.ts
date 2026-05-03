@@ -1,15 +1,15 @@
 import { sum, sumBy } from 'lodash';
-import { DataFrame } from 'danfojs-node';
+import { HistoricalData } from '../src/historical-data';
 import { Broker } from '../src/broker';
 import { Position } from '../src/position';
 import { Trade } from '../src/trade';
 
 describe('Position', () => {
-  let data: DataFrame;
+  let data: HistoricalData;
   let broker: Broker;
 
   beforeEach(() => {
-    data = new DataFrame(require('./fixtures/2330.json'));
+    data = new HistoricalData(require('./fixtures/2330.json'));
     broker = new Broker(data, {
       cash: 10000,
       commission: 0,
