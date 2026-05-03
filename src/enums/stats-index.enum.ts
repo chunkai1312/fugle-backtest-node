@@ -27,4 +27,8 @@ export enum StatsIndex {
   ProfitFactor = 'Profit Factor',
   Expectancy = 'Expectancy [%]',
   SQN = 'SQN',
+  AvgWinPct = 'Avg. Win [%]',
+  AvgLossPct = 'Avg. Loss [%]',
+  WinLossRatio = 'Win/Loss Ratio',
+  KellyCriterion = 'Kelly Criterion',
 }

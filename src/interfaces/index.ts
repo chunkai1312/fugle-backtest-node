@@ -6,3 +6,6 @@ export * from './stats-options.interface';
 export * from './plotting-options.interface';
 export * from './historical-data.interface';
 export * from './context.interface';
+export * from './optimize-options.interface';
+export * from './optimize-result.interface';
+export * from './param-heatmap.interface';
