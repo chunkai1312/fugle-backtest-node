@@ -1,6 +1,6 @@
 import * as assert from 'assert';
-import { DataFrame } from 'danfojs-node';
-import { last, first, sumBy, remove } from 'lodash';
+import { sumBy, remove } from 'lodash';
+import { HistoricalData } from './historical-data';
 import { Order } from './order';
 import { Trade } from './trade';
 import { Position } from './position';
@@ -20,7 +20,7 @@ export class Broker {
   public closedTrades: Trade[];
   public position?: Position;
 
-  constructor(private readonly data: DataFrame, options: BrokerOptions) {
+  constructor(private readonly data: HistoricalData, options: BrokerOptions) {
     assert(0 < options.cash, `cash should be > 0, is ${options.cash}`);
     assert(options.commission >= -0.1 && options.commission < 0.1,
       `commission should be between -10% (e.g. market-maker's rebates) and 10% (fees), is ${options.commission}`,
@@ -35,7 +35,7 @@ export class Broker {
     this._hedging = options.hedging;
     this._exclusiveOrders = options.exclusiveOrders;
 
-    this.equities = Array(data.index.length).fill(NaN);
+    this.equities = Array(data.length).fill(NaN);
     this.orders = [];
     this.trades = [];
     this.position = new Position(this);
@@ -43,12 +43,12 @@ export class Broker {
   }
 
   get index() {
-    return this.data.index;
+    return this.data.date;
   }
 
   get lastPrice() {
-    const i = (this._i === this.data.index.length) ? this._i - 1 : this._i;
-    return this.data['close'].iat(i);
+    const i = (this._i === this.data.length) ? this._i - 1 : this._i;
+    return this.data.close[i];
   }
 
   get equity() {
@@ -102,7 +102,7 @@ export class Broker {
     if (this.equity <= 0) {
       assert(this.marginAvailable <= 0);
       for (const trade of this.trades) {
-        this.closeTrade({ trade, price: last(this.data['close'].values) as number, timeIndex: this._i });
+        this.closeTrade({ trade, price: this.data.close[this.data.length - 1], timeIndex: this._i });
       }
       this._cash = 0;
       this.equities.fill(0);
@@ -112,16 +112,43 @@ export class Broker {
   }
 
   public last() {
-    this._i = this.index.length - 1;
+    this._i = this.data.length - 1;
     this.next();
   }
 
+  private updateTrailingStops() {
+    const i = this._i;
+    /* istanbul ignore if */
+    if (i >= this.data.length) return;
+    const high = this.data.high[i];
+    const low = this.data.low[i];
+
+    for (const trade of this.trades) {
+      if (!trade.isTrailing) continue;
+      trade.updateTrailingPeak(high, low);
+      const newSL = trade.computeTrailingSL();
+      /* istanbul ignore if */
+      if (newSL === undefined) continue;
+
+      const currentSL = trade.slOrder?.stop;
+      if (currentSL === undefined) {
+        trade.applyTrailingSL(newSL);
+      } else if (trade.isLong && newSL > currentSL) {
+        trade.applyTrailingSL(newSL);
+      } else if (trade.isShort && newSL < currentSL) {
+        trade.applyTrailingSL(newSL);
+      }
+    }
+  }
+
   private processOrders() {
-    const data = this.data.head(this._i + 1);
-    const open = last(data['open'].values) as number;
-    const high = last(data['high'].values) as number;
-    const low = last(data['low'].values) as number;
-    const prevClose = first(data['close'].values.slice(-2)) as number;
+    this.updateTrailingStops();
+
+    const i = this._i;
+    const open = this.data.open[i];
+    const high = this.data.high[i];
+    const low = this.data.low[i];
+    const prevClose = i > 0 ? this.data.close[i - 1] : this.data.close[i];
     let reprocessOrders = false;
 
     for (let i = 0; i < this.orders.length; i++) {
@@ -219,9 +246,18 @@ export class Broker {
       }
 
       if (needSize) {
-        this.openTrade({ price: adjustedPrice, size: needSize, sl: order.sl, tp: order.tp, timeIndex, tag: order.tag });
+        this.openTrade({
+          price: adjustedPrice,
+          size: needSize,
+          sl: order.sl,
+          tp: order.tp,
+          timeIndex,
+          tag: order.tag,
+          trailPercent: order.trailPercent,
+          trailAmount: order.trailAmount,
+        });
         /* istanbul ignore if */
-        if ((order.sl || order.tp) && isMarketOrder) reprocessOrders = true;
+        if ((order.sl || order.tp || order.trailPercent !== undefined || order.trailAmount !== undefined) && isMarketOrder) reprocessOrders = true;
       }
 
       remove(this.orders, o => o === order);
@@ -240,16 +276,43 @@ export class Broker {
     return (price || this.lastPrice) * (1 + (this._commission * Math.sign(size)));
   }
 
-  private openTrade(options: { price: number, size: number, sl?: number, tp?: number, timeIndex: number, tag?: Record<string, string> }) {
-    const { price, size, sl, tp, timeIndex, tag } = options;
+  private openTrade(options: {
+    price: number,
+    size: number,
+    sl?: number,
+    tp?: number,
+    timeIndex: number,
+    tag?: Record<string, string>,
+    trailPercent?: number,
+    trailAmount?: number,
+  }) {
+    const { price, size, sl, tp, timeIndex, tag, trailPercent, trailAmount } = options;
 
-    const trade = new Trade(this, { size, entryPrice: price, entryBar: timeIndex, tag });
+    const trade = new Trade(this, {
+      size,
+      entryPrice: price,
+      entryBar: timeIndex,
+      tag,
+      trailPercent,
+      trailAmount,
+    });
     this.trades.push(trade);
 
     /* istanbul ignore if */
     if (tp) trade.tp = tp;
-    /* istanbul ignore if */
-    if (sl) trade.sl = sl;
+
+    if (trade.isTrailing) {
+      // Constructor guarantees peakHigh/peakLow are set when trailing,
+      // so computeTrailingSL() is defined here.
+      const initialTrailingSL = trade.computeTrailingSL() as number;
+      const startSL = sl !== undefined
+        ? (trade.isLong ? Math.max(sl, initialTrailingSL) : Math.min(sl, initialTrailingSL))
+        : initialTrailingSL;
+      trade.applyTrailingSL(startSL);
+    } else if (sl) {
+      /* istanbul ignore next */
+      trade.sl = sl;
+    }
   }
 
   private closeTrade(options: { trade: Trade, price: number, timeIndex: number }) {
@@ -259,7 +322,7 @@ export class Broker {
     if (trade.slOrder) remove(this.orders, o => o === trade.slOrder);
     if (trade.tpOrder) remove(this.orders, o => o === trade.tpOrder);
 
-    this.closedTrades?.push(trade.replace({ exitPrice: price, exitBar: timeIndex }));
+    this.closedTrades.push(trade.replace({ exitPrice: price, exitBar: timeIndex }));
     this._cash += options.trade.pl;
   }
 

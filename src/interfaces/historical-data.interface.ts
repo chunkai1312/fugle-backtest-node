@@ -16,4 +16,4 @@ export interface CandleList {
   volume?: number[];
 }
 
-export type HistoricalData = Array<Candle> | CandleList;
+export type HistoricalDataInput = Array<Candle> | CandleList;

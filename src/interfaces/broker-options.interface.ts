@@ -1,3 +1,3 @@
 import { BacktestOptions } from './backtest-options.interface';
 
-export interface BrokerOptions extends Required<BacktestOptions> {}
+export type BrokerOptions = Required<BacktestOptions>

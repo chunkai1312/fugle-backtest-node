@@ -1,13 +1,21 @@
 import * as assert from 'assert';
-import { DataFrame } from 'danfojs-node';
 import { Broker } from './broker';
+import { HistoricalData } from './historical-data';
 import { Context, OrderOptions } from './interfaces';
+
+export interface IndicatorOptions {
+  /** Render the indicator as a line on the price panel (true) or in its own subplot (false). Default `true`. */
+  overlay?: boolean;
+  /** Plotly line color for the indicator trace. */
+  color?: string;
+}
 
 export abstract class Strategy {
   private _indicators: Record<string, number[] | Record<string, number>[]> = {};
+  private _indicatorMeta: Record<string, Required<IndicatorOptions>> = {};
   private _signals: Record<string, boolean[]> = {};
 
-  constructor(public readonly data: DataFrame, private readonly broker: Broker) {}
+  constructor(public readonly data: HistoricalData, private readonly broker: Broker) {}
 
   get equity() {
     return this.broker.equity;
@@ -71,28 +79,45 @@ export abstract class Strategy {
   }
 
   /**
-   * Add an indicator.
+   * Add an indicator. The optional `options` controls how the plotter renders it:
+   * `overlay: true` (default) draws the indicator on the price panel; `overlay: false`
+   * gives it its own subplot. `color` is passed to Plotly as the line color.
    */
-  public addIndicator(name: string, values: number[] | Record<string, number>[]) {
-    if (values.length < this.data.index.length) {
-      values = Array(this.data.index.length - values.length).fill(null).concat(values);
+  public addIndicator(
+    name: string,
+    values: number[] | Record<string, number>[],
+    options?: IndicatorOptions,
+  ): void {
+    if (values.length < this.data.length) {
+      values = Array(this.data.length - values.length).fill(null).concat(values);
     }
     this._indicators[name] = values;
+    this._indicatorMeta[name] = {
+      overlay: options?.overlay ?? true,
+      color: options?.color ?? '',
+    };
   }
 
   /**
-   * Get the indicator.
+   * Get the indicator values.
    */
   public getIndicator(name: string) {
     return this._indicators[name];
   }
 
   /**
+   * Get the indicator's plotting options.
+   */
+  public getIndicatorOptions(name: string): Required<IndicatorOptions> | undefined {
+    return this._indicatorMeta[name];
+  }
+
+  /**
    * Add a signal.
    */
   public addSignal(name: string, values: boolean[]) {
-    if (values.length < this.data.index.length) {
-      values = Array(this.data.index.length - values.length).fill(null).concat(values);
+    if (values.length < this.data.length) {
+      values = Array(this.data.length - values.length).fill(null).concat(values);
     }
     this._signals[name] = values;
   }

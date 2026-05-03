@@ -1,44 +1,37 @@
-import { DataFrame, Series, toJSON } from 'danfojs-node';
-import { intersection, maxBy } from 'lodash';
+import { HistoricalData } from './historical-data';
 import { Strategy as BaseStrategy } from './strategy';
 import { Broker } from './broker';
 import { Trade } from './trade';
-import { Stats } from './stats';
-import { HistoricalData, BacktestOptions, Context } from './interfaces';
+import { Stats, StatsResults } from './stats';
+import {
+  HistoricalDataInput,
+  BacktestOptions,
+  Context,
+  OptimizeOptions,
+  OptimizeResult,
+  OptimizeRun,
+  ParamHeatmap,
+} from './interfaces';
 import { StatsIndex } from './enums';
+import { mulberry32, sampleWithoutReplacement } from './utils/random';
 
 export class Backtest {
-  private _data: DataFrame;
+  private _data: HistoricalData;
   private _stats?: Stats;
 
-  constructor(data: HistoricalData,
-    private readonly Strategy: new (data: DataFrame, broker: Broker) => BaseStrategy,
+  constructor(data: HistoricalDataInput,
+    private readonly Strategy: new (data: HistoricalData, broker: Broker) => BaseStrategy,
     private readonly options?: BacktestOptions,
   ) {
-    this._data = new DataFrame(data);
-
     if (!(Strategy.prototype instanceof BaseStrategy)) {
       throw new TypeError('Invalid `Strategy`');
     }
 
-    if (!this._data.size) {
-      throw new TypeError('The `data` is empty');
-    }
+    this._data = new HistoricalData(data);
 
-    if (!this._data['volume']) {
-      this._data.addColumn('volume', Array(this._data.index.length).fill(NaN), { inplace: true });
-    }
-
-    if (intersection(this._data.columns, ['date', 'open', 'high', 'low', 'close', 'volume']).length !== 6) {
-      throw new TypeError('The `data` must contain `date`, `open`, `high`, `low`, `close`, and `volume` (optional)');
-    }
-
-    if (this._data['close'].values.some((value: number) => value > (options?.cash || 10000))) {
+    if (this._data.close.some(value => value > (options?.cash || 10000))) {
       console.warn('Some prices are larger than initial cash value.');
     }
-
-    this._data.setIndex({ index: this._data['date'].values, column: 'date', drop: true, inplace: true });
-    this._data.sortIndex({ ascending: true, inplace: true });
   }
 
   get data() {
@@ -82,7 +75,7 @@ export class Backtest {
     const stats = new Stats(
       data,
       strategy,
-      new Series(broker.equities),
+      broker.equities,
       broker.closedTrades as Trade[],
       { riskFreeRate: 0 },
     ).compute();
@@ -93,41 +86,139 @@ export class Backtest {
   }
 
   /**
-   * Optimize strategy parameters.
+   * Optimize strategy parameters across a parameter grid.
+   *
+   * Returns an `OptimizeResult` with the best `Stats`, the winning parameter
+   * combination, the score, and optionally a 2D heatmap or every executed run.
    */
-  public async optimize(options: { params: Record<string, number[]>, max?: StatsIndex }) {
-    /* istanbul ignore next */
-    if (!options?.params || !Object.keys(options?.params).length) {
+  public async optimize(options: OptimizeOptions): Promise<OptimizeResult> {
+    const params = options.params;
+    if (!params || !Object.keys(params).length || Object.values(params).some(arr => !arr.length)) {
       throw new Error('Need some strategy parameters to optimize');
     }
+    if (options.max !== undefined && options.maximize !== undefined) {
+      throw new TypeError('Provide either `maximize` or the deprecated `max`, not both');
+    }
+    if (options.method === 'random' && options.maxTries === undefined) {
+      throw new TypeError('`method: "random"` requires `maxTries`');
+    }
+    if (options.returnHeatmap && Object.keys(params).length < 2) {
+      throw new Error('returnHeatmap requires at least 2 params');
+    }
 
-    const paramsCombinations = ((params: Record<string, number[]>): Record<string, number>[] => {
-      const keys = Object.keys(params);
-      const result: Record<string, number>[] = [];
-      const combine = (index: number, current: Record<string, number>) => {
-        if (index === keys.length) {
-          result.push(current);
-          return;
-        }
-        const key = keys[index];
-        const values = params[key];
-        for (let i = 0; i < values.length; i++) {
-          const param = { [key]: values[i] }
-          combine(index + 1, { ...current, ...param });
-        }
-      };
-      combine(0, {});
-      return result;
-    })(options.params);
+    const maximize: StatsIndex | ((stats: StatsResults) => number) =
+      options.maximize ?? options.max ?? StatsIndex.EquityFinal;
 
-    const max = options.max || StatsIndex.EquityFinal;
+    const allCombos = this.expandParams(params);
+    const constraint = options.constraint;
+    const filtered = constraint ? allCombos.filter(constraint) : allCombos;
 
-    const stats = await Promise.all(paramsCombinations.map(params => this.run({ params })))
-      .then(data => maxBy(data, (stats) => stats.results && stats.results.at(max)))
+    if (!filtered.length) {
+      throw new Error('All combinations were filtered by constraint');
+    }
 
-    this._stats = stats;
+    const seed = options.seed ?? Date.now();
+    const rng = mulberry32(seed);
+    const shouldSample =
+      options.method === 'random' ||
+      (options.maxTries !== undefined && filtered.length > options.maxTries);
+    const selected = shouldSample
+      ? sampleWithoutReplacement(filtered, options.maxTries as number, rng)
+      : filtered;
 
-    return stats;
+    const runs: OptimizeRun[] = await Promise.all(
+      selected.map(async params => {
+        const stats = await this.run({ params });
+        const score = this.scoreStats(stats, maximize);
+        return { params, score, stats };
+      }),
+    );
+
+    const ranked = runs.filter(r => !Number.isNaN(r.score));
+    if (!ranked.length) {
+      throw new Error('All combinations produced NaN scores; cannot rank');
+    }
+
+    let best = ranked[0];
+    for (let i = 1; i < ranked.length; i++) {
+      if (ranked[i].score > best.score) best = ranked[i];
+    }
+
+    this._stats = best.stats;
+
+    const result: OptimizeResult = {
+      best: best.stats,
+      bestParams: best.params,
+      bestScore: best.score,
+    };
+    if (options.returnAll) result.all = runs;
+    if (options.returnHeatmap) {
+      result.heatmap = this.buildHeatmap(runs, params, maximize);
+    }
+    return result;
+  }
+
+  private expandParams(params: Record<string, number[]>): Record<string, number>[] {
+    const keys = Object.keys(params);
+    const result: Record<string, number>[] = [];
+    const combine = (index: number, current: Record<string, number>): void => {
+      if (index === keys.length) {
+        result.push(current);
+        return;
+      }
+      const key = keys[index];
+      const values = params[key];
+      for (let i = 0; i < values.length; i++) {
+        combine(index + 1, { ...current, [key]: values[i] });
+      }
+    };
+    combine(0, {});
+    return result;
+  }
+
+  private scoreStats(stats: Stats, maximize: StatsIndex | ((s: StatsResults) => number)): number {
+    const results = stats.results;
+    /* istanbul ignore if */
+    if (!results) return NaN;
+    const value = typeof maximize === 'function' ? maximize(results) : results[maximize];
+    return typeof value === 'number' ? value : NaN;
+  }
+
+  private buildHeatmap(
+    runs: OptimizeRun[],
+    params: Record<string, number[]>,
+    maximize: StatsIndex | ((s: StatsResults) => number),
+  ): ParamHeatmap {
+    const keys = Object.keys(params);
+    const xLabel = keys[0];
+    const yLabel = keys[1];
+    const xValues = [...new Set(params[xLabel])].sort((a, b) => a - b);
+    const yValues = [...new Set(params[yLabel])].sort((a, b) => a - b);
+    const z = yValues.map(() => xValues.map(() => Number.NEGATIVE_INFINITY));
+
+    for (const run of runs) {
+      if (Number.isNaN(run.score)) continue;
+      const xi = xValues.indexOf(run.params[xLabel]);
+      const yi = yValues.indexOf(run.params[yLabel]);
+      /* istanbul ignore if */
+      if (xi < 0 || yi < 0) continue;
+      if (run.score > z[yi][xi]) z[yi][xi] = run.score;
+    }
+    // Replace cells that received no run (still -Infinity) with NaN for clarity.
+    for (let i = 0; i < z.length; i++) {
+      for (let j = 0; j < z[i].length; j++) {
+        if (z[i][j] === Number.NEGATIVE_INFINITY) z[i][j] = NaN;
+      }
+    }
+
+    return {
+      xLabel,
+      yLabel,
+      xValues,
+      yValues,
+      z,
+      metric: typeof maximize === 'function' ? 'custom' : maximize,
+    };
   }
 
   /**
@@ -155,13 +246,16 @@ export class Backtest {
   }
 
   private * runner(strategy: BaseStrategy) {
-    for (let i = 0, context = {}; i < strategy.data.index.length; i++) {
+    const data = strategy.data;
+    for (let i = 0, context = {}; i < data.length; i++) {
       const index = i;
-      const rows = strategy.data.iloc({ rows: [i] });
-
-      const data = {
-        date: rows.index[0],
-        ...(toJSON(rows) as Record<string, number>[])[0],
+      const bar = {
+        date: data.date[i],
+        open: data.open[i],
+        high: data.high[i],
+        low: data.low[i],
+        close: data.close[i],
+        volume: data.volume[i],
       };
 
       const indicators = new Map(
@@ -177,7 +271,7 @@ export class Backtest {
       );
 
       const prev = context;
-      const current = { index, data, indicators, signals };
+      const current = { index, data: bar, indicators, signals };
       context = { ...current, prev };
 
       yield context;

@@ -1,22 +1,54 @@
 import * as assert from 'assert';
-import { DataFrame, Series } from 'danfojs-node';
-import { uniq, first, last } from 'lodash';
 import { DateTime } from 'luxon';
+import { HistoricalData } from './historical-data';
 import { StatsOptions } from './interfaces';
 import { StatsIndex, EquityCurveColumn, TradeLogColumn } from './enums';
 import { Strategy } from './strategy';
 import { Trade } from './trade';
 import { Plotting } from './plotting';
+import {
+  cumMax,
+  geometricMean,
+  max,
+  mean,
+  min,
+  stddev,
+  sum,
+  variance,
+} from './utils/series';
+
+export type StatsResults = Record<StatsIndex, number | string>;
+
+export interface EquityCurveRow {
+  date: string;
+  [EquityCurveColumn.Equity]: number;
+  [EquityCurveColumn.DrawdownPct]: number;
+  [EquityCurveColumn.DrawdownDuration]: number;
+}
+
+export interface TradeLogRow {
+  [TradeLogColumn.Size]: number;
+  [TradeLogColumn.EntryBar]: number;
+  [TradeLogColumn.ExitBar]: number | undefined;
+  [TradeLogColumn.EntryPrice]: number;
+  [TradeLogColumn.ExitPrice]: number | undefined;
+  [TradeLogColumn.PnL]: number;
+  [TradeLogColumn.ReturnPct]: number;
+  [TradeLogColumn.EntryTime]: string;
+  [TradeLogColumn.ExitTime]: string;
+  [TradeLogColumn.Tag]: Record<string, string> | undefined;
+  [TradeLogColumn.Duration]: number;
+}
 
 export class Stats {
-  private _equityCurve?: DataFrame;
-  private _tradeLog?: DataFrame;
-  private _results?: Series;
+  private _equityCurve?: EquityCurveRow[];
+  private _tradeLog?: TradeLogRow[];
+  private _results?: StatsResults;
 
   constructor(
-    private readonly data: DataFrame,
+    private readonly data: HistoricalData,
     private readonly strategy: Strategy,
-    private readonly equity: Series,
+    private readonly equity: number[],
     private readonly trades: Trade[],
     private readonly options: StatsOptions,
   ) {}
@@ -39,119 +71,166 @@ export class Stats {
 
     assert(riskFreeRate > -1 && riskFreeRate < 1);
 
-    const index = this.data.index as string[];
-    const dd = new Series(Array(this.equity.count()).fill(1), { index }).sub(this.equity.div(this.equity.cumMax())) as Series;
-    const [ ddDur, ddPeaks ] = this.computeDrawdownDurationPeaks(dd);
+    const dateIndex = this.data.date;
+    const equityCumMax = cumMax(this.equity);
+    const dd = this.equity.map((v, i) => 1 - v / equityCumMax[i]);
+    const [ddDur, ddPeaks] = this.computeDrawdownDurationPeaks(dd, dateIndex);
 
-    const equityCurve = new DataFrame({
-      [EquityCurveColumn.Equity]: this.equity.values,
-      [EquityCurveColumn.DrawdownPct]: dd.values,
-      [EquityCurveColumn.DrawdownDuration]: ddDur.values,
-    }, { index });
+    const equityCurve: EquityCurveRow[] = dateIndex.map((d, i) => ({
+      date: d,
+      [EquityCurveColumn.Equity]: this.equity[i],
+      [EquityCurveColumn.DrawdownPct]: dd[i],
+      [EquityCurveColumn.DrawdownDuration]: ddDur[i],
+    }));
 
-    const tradeLog = new DataFrame(
-      this.trades.map(trade => ({
-        [TradeLogColumn.Size]: trade.size,
-        [TradeLogColumn.EntryBar]: trade.entryBar,
-        [TradeLogColumn.ExitBar]: trade.exitBar,
-        [TradeLogColumn.EntryPrice]: trade.entryPrice,
-        [TradeLogColumn.ExitPrice]: trade.exitPrice,
-        [TradeLogColumn.PnL]: this.foramt(trade.pl),
-        [TradeLogColumn.ReturnPct]: this.foramt(trade.plPct),
-        [TradeLogColumn.EntryTime]: trade.entryTime,
-        [TradeLogColumn.ExitTime]: trade.exitTime,
-        [TradeLogColumn.Tag]: trade.tag,
-        [TradeLogColumn.Duration]: DateTime.fromISO(trade.exitTime).diff(DateTime.fromISO(trade.entryTime), 'days').get('days'),
-      })),
-      { config: { tableMaxRow: this.trades.length } },
-    );
+    const tradeLog: TradeLogRow[] = this.trades.map(trade => ({
+      [TradeLogColumn.Size]: trade.size,
+      [TradeLogColumn.EntryBar]: trade.entryBar,
+      [TradeLogColumn.ExitBar]: trade.exitBar,
+      [TradeLogColumn.EntryPrice]: trade.entryPrice,
+      [TradeLogColumn.ExitPrice]: trade.exitPrice,
+      [TradeLogColumn.PnL]: this.format(trade.pl),
+      [TradeLogColumn.ReturnPct]: this.format(trade.plPct),
+      [TradeLogColumn.EntryTime]: trade.entryTime,
+      [TradeLogColumn.ExitTime]: trade.exitTime,
+      [TradeLogColumn.Tag]: trade.tag,
+      [TradeLogColumn.Duration]: DateTime.fromISO(trade.exitTime)
+        .diff(DateTime.fromISO(trade.entryTime), 'days')
+        .get('days'),
+    }));
 
-    const pl = tradeLog[TradeLogColumn.PnL] as Series;
-    const returns = tradeLog[TradeLogColumn.ReturnPct] as Series;
-    const durations = tradeLog[TradeLogColumn.Duration] as Series;
+    const pl = tradeLog.map(t => t[TradeLogColumn.PnL]);
+    const returns = tradeLog.map(t => t[TradeLogColumn.ReturnPct]);
+    const durations = tradeLog.map(t => t[TradeLogColumn.Duration]);
 
-    const start = DateTime.fromISO(first(index) as string);
-    const end = DateTime.fromISO(last(index) as string);
+    const start = DateTime.fromISO(dateIndex[0]);
+    const end = DateTime.fromISO(dateIndex[dateIndex.length - 1]);
 
-    const results = new Series(
-      [ this.strategy.toString(), start.toISODate(), end.toISODate(), end.diff(start, 'days').get('days')],
-      { index: [ StatsIndex.Strategy, StatsIndex.Start, StatsIndex.End, StatsIndex.Duration] },
-    );
+    const results = {} as StatsResults;
+    results[StatsIndex.Strategy] = this.strategy.toString();
+    results[StatsIndex.Start] = start.toISODate();
+    results[StatsIndex.End] = end.toISODate();
+    results[StatsIndex.Duration] = end.diff(start, 'days').get('days');
 
-    const exposureTime = this.computeExposureTime(index, tradeLog);
-    const equityFinal = this.equity.iat(index.length - 1) as number;
-    const equityPeak = this.equity.max();
+    const exposureTime = this.computeExposureTime(dateIndex.length, tradeLog);
+    const equityFinal = this.equity[this.equity.length - 1];
+    const equityPeak = max(this.equity);
     const returnPct = this.computeReturnPct(this.equity);
-    const buyAndHoldReturn = this.computeReturnPct(this.data['close']);
+    const buyAndHoldReturn = this.computeReturnPct(this.data.close);
 
-    results.append(
-      [ exposureTime, equityFinal, equityPeak, returnPct, buyAndHoldReturn ],
-      [ StatsIndex.ExposureTime, StatsIndex.EquityFinal, StatsIndex.EquityPeak, StatsIndex.Return, StatsIndex.BuyAndHoldReturn ],
-      { inplace: true },
-    );
+    results[StatsIndex.ExposureTime] = exposureTime;
+    results[StatsIndex.EquityFinal] = equityFinal;
+    results[StatsIndex.EquityPeak] = equityPeak;
+    results[StatsIndex.Return] = returnPct;
+    results[StatsIndex.BuyAndHoldReturn] = buyAndHoldReturn;
 
     let gmeanDayReturn = 0;
-    let dayReturns = new Series(Array(this.equity.count()).fill(NaN));
+    let dayReturns: number[] = new Array(this.equity.length).fill(NaN);
     let annualTradingDays = NaN;
 
-    if (index.length) {
-      dayReturns = this.computeDayReturns(equityCurve['Equity']);
-      gmeanDayReturn = this.computeGeometricMean(dayReturns);
-      const d = new Series(index.map(date => DateTime.fromISO(date).get('weekday')));
+    if (dateIndex.length) {
+      dayReturns = this.computeDayReturns(this.equity, dateIndex);
+      gmeanDayReturn = geometricMean(dayReturns);
+      const weekdays = dateIndex.map(d => DateTime.fromISO(d).get('weekday'));
       /* istanbul ignore next */
-      annualTradingDays = (d.eq(0).or(d.eq(6)).mean() > 2 / 7 * 0.6) ? 365 : 252;
+      const weekendShare = mean(weekdays.map(w => (w === 0 || w === 6 ? 1 : 0)));
+      /* istanbul ignore next */
+      annualTradingDays = weekendShare > (2 / 7) * 0.6 ? 365 : 252;
     }
 
     const annualizedReturn = (1 + gmeanDayReturn) ** annualTradingDays - 1;
-    const volatility = Math.sqrt((dayReturns.var() + (1 + gmeanDayReturn)**2)**annualTradingDays - (1 + gmeanDayReturn) ** (2*annualTradingDays)) * 100;
-    const sharpeRatio = ((annualizedReturn * 100) - riskFreeRate) / (volatility || NaN);
-    const sortinoRatio = (annualizedReturn - riskFreeRate) / (Math.sqrt(dayReturns.apply(v => (v > Number.NEGATIVE_INFINITY && v < 0) ? v ** 2 : 0).mean()) * Math.sqrt(annualTradingDays));
-    const calmarRatio = annualizedReturn / (dd.max() || NaN);
+    const volatility =
+      Math.sqrt(
+        (variance(dayReturns) + (1 + gmeanDayReturn) ** 2) ** annualTradingDays -
+          (1 + gmeanDayReturn) ** (2 * annualTradingDays),
+      ) * 100;
+    const sharpeRatio = (annualizedReturn * 100 - riskFreeRate) / (volatility || NaN);
+    const sortinoRatio =
+      (annualizedReturn - riskFreeRate) /
+      (Math.sqrt(
+        mean(dayReturns.map(v => (v > Number.NEGATIVE_INFINITY && v < 0 ? v ** 2 : 0))),
+      ) *
+        Math.sqrt(annualTradingDays));
+    const calmarRatio = annualizedReturn / (max(dd) || NaN);
 
-    results.append(
-      [ annualizedReturn * 100, volatility, sharpeRatio, sortinoRatio, calmarRatio ],
-      [ StatsIndex.ReturnAnn, StatsIndex.VolatilityAnn, StatsIndex.SharpeRatio, StatsIndex.SortinoRatio, StatsIndex.CalmarRatio ],
-      { inplace: true },
-    );
+    results[StatsIndex.ReturnAnn] = annualizedReturn * 100;
+    results[StatsIndex.VolatilityAnn] = volatility;
+    results[StatsIndex.SharpeRatio] = sharpeRatio;
+    results[StatsIndex.SortinoRatio] = sortinoRatio;
+    results[StatsIndex.CalmarRatio] = calmarRatio;
 
-    const maxDrawdown = -dd.max() * 100;
-    const avgDrawdown = ddPeaks.count() ? -ddPeaks.mean() * 100 : NaN;
-    const maxDrawdownDuration = ddDur.count() ? Math.ceil(ddDur.max()) : NaN;
-    const avgDrawdownDuration = ddDur.count() ? Math.ceil(ddDur.mean()) : NaN;
+    const ddDurNonNaN = ddDur.filter(v => !Number.isNaN(v));
+    const ddPeaksNonNaN = ddPeaks.filter(v => !Number.isNaN(v));
 
-    results.append(
-      [ maxDrawdown, avgDrawdown, maxDrawdownDuration, avgDrawdownDuration ],
-      [ StatsIndex.MaxDrawdown, StatsIndex.AvgDrawdown, StatsIndex.MaxDrawdownDuration, StatsIndex.AvgDrawdownDuration ],
-      { inplace: true },
-    );
+    const maxDrawdown = -max(dd) * 100;
+    const avgDrawdown = ddPeaksNonNaN.length ? -mean(ddPeaks) * 100 : NaN;
+    const maxDrawdownDuration = ddDurNonNaN.length ? Math.ceil(max(ddDur)) : NaN;
+    const avgDrawdownDuration = ddDurNonNaN.length ? Math.ceil(mean(ddDur)) : NaN;
+
+    results[StatsIndex.MaxDrawdown] = maxDrawdown;
+    results[StatsIndex.AvgDrawdown] = avgDrawdown;
+    results[StatsIndex.MaxDrawdownDuration] = maxDrawdownDuration;
+    results[StatsIndex.AvgDrawdownDuration] = avgDrawdownDuration;
 
     const nTrades = this.trades.length;
-    const winRate = nTrades ? pl.gt(0).mean() * 100 : NaN;
-    const bestTrade = nTrades ? returns.max() * 100 : NaN;
-    const worstTrade = nTrades ? returns.min() * 100 : NaN;
-    const meanReturn = nTrades ? this.computeGeometricMean(returns) : NaN;
+    const winRate = nTrades ? mean(pl.map(v => (v > 0 ? 1 : 0))) * 100 : NaN;
+    const bestTrade = nTrades ? max(returns) * 100 : NaN;
+    const worstTrade = nTrades ? min(returns) * 100 : NaN;
+    const meanReturn = nTrades ? geometricMean(returns) : NaN;
     const avgTrade = nTrades ? meanReturn * 100 : NaN;
-    const maxTradeDuration = nTrades ? Math.ceil(durations.max()) : NaN;
-    const avgTradeDuration = nTrades ? Math.ceil(durations.mean()) : NaN;
+    const maxTradeDuration = nTrades ? Math.ceil(max(durations)) : NaN;
+    const avgTradeDuration = nTrades ? Math.ceil(mean(durations)) : NaN;
 
-    results.append(
-      [ nTrades, winRate, bestTrade, worstTrade, avgTrade, maxTradeDuration, avgTradeDuration ],
-      [ StatsIndex.Trades, StatsIndex.WinRate, StatsIndex.BestTrade, StatsIndex.WorstTrade, StatsIndex.AvgTrade, StatsIndex.MaxTradeDuration, StatsIndex.AvgTradeDuration ],
-      { inplace: true },
-    );
+    results[StatsIndex.Trades] = nTrades;
+    results[StatsIndex.WinRate] = winRate;
+    results[StatsIndex.BestTrade] = bestTrade;
+    results[StatsIndex.WorstTrade] = worstTrade;
+    results[StatsIndex.AvgTrade] = avgTrade;
+    results[StatsIndex.MaxTradeDuration] = maxTradeDuration;
+    results[StatsIndex.AvgTradeDuration] = avgTradeDuration;
 
-    const profitFactor = nTrades ? returns.apply(r => r > 0 ? r : null).sum() / (Math.abs(returns.apply(r => r < 0 ? r : null).sum())) : NaN;
-    const expectancy = nTrades ? returns.mean() * 100 : NaN;
-    const sqn = nTrades ? Math.sqrt(nTrades) * pl.mean() / pl.std() : NaN;
+    const positiveSum = sum(returns.map(r => (r > 0 ? r : 0)));
+    const negativeSum = sum(returns.map(r => (r < 0 ? r : 0)));
+    const profitFactor = nTrades ? positiveSum / Math.abs(negativeSum) : NaN;
+    const expectancy = nTrades ? mean(returns) * 100 : NaN;
+    const sqn = nTrades ? (Math.sqrt(nTrades) * mean(pl)) / stddev(pl) : NaN;
 
-    results.append(
-      [ profitFactor, expectancy, sqn ],
-      [ StatsIndex.ProfitFactor, StatsIndex.Expectancy, StatsIndex.SQN ],
-      { inplace: true },
-    );
+    results[StatsIndex.ProfitFactor] = profitFactor;
+    results[StatsIndex.Expectancy] = expectancy;
+    results[StatsIndex.SQN] = sqn;
 
-    results.apply(v => (typeof v === 'number') ? this.foramt(v) : v, { inplace: true });
-    results.config.setMaxRow(results.index.length);
+    const winners = tradeLog.filter(t => t[TradeLogColumn.PnL] > 0);
+    const losers = tradeLog.filter(t => t[TradeLogColumn.PnL] <= 0);
+    const avgWinPct = nTrades && winners.length
+      ? mean(winners.map(t => t[TradeLogColumn.ReturnPct])) * 100
+      : nTrades ? 0 : NaN;
+    const avgLossPct = nTrades && losers.length
+      ? mean(losers.map(t => t[TradeLogColumn.ReturnPct])) * 100
+      : nTrades ? 0 : NaN;
+    const winLossRatio = !nTrades
+      ? NaN
+      : !winners.length
+        ? 0
+        : !losers.length
+          ? Infinity
+          : Math.abs(avgWinPct) / Math.abs(avgLossPct);
+    const kellyCriterion = !nTrades
+      ? NaN
+      : !winners.length
+        ? 0
+        : !losers.length
+          ? winRate / 100
+          : winRate / 100 - (1 - winRate / 100) / (Math.abs(avgWinPct) / Math.abs(avgLossPct));
+
+    results[StatsIndex.AvgWinPct] = avgWinPct;
+    results[StatsIndex.AvgLossPct] = avgLossPct;
+    results[StatsIndex.WinLossRatio] = winLossRatio;
+    results[StatsIndex.KellyCriterion] = kellyCriterion;
+
+    for (const key of Object.keys(results) as StatsIndex[]) {
+      const v = results[key];
+      if (typeof v === 'number') results[key] = this.format(v);
+    }
 
     this._equityCurve = equityCurve;
     this._tradeLog = tradeLog;
@@ -161,110 +240,105 @@ export class Stats {
   }
 
   public print() {
-    if (!this.results) {
+    if (!this._results) {
       throw new Error('No stats results');
     }
-    this.results.print();
+    console.table(this._results);
   }
 
   public plot() {
-    if (!this.results) {
+    if (!this._results) {
       throw new Error('No stats results');
     }
     new Plotting(this).plot();
   }
 
-  private computeExposureTime(index: string[], tradeLog: DataFrame) {
-    const trades = tradeLog.values as Array<number[]>;
-
-    const havePosition = new Series(
-      trades.reduce((havePosition: number[], t: number[]) => {
-        const [ size, entryBar, exitBar ] = t;
-        return havePosition.map((value, index) => {
-          return Array.from(
-            { length: (exitBar - entryBar) + 1 },
-            (v, i) => i + entryBar
-          ).includes(index) ? 1 : value;
-        });
-      }, Array(index.length).fill(0)),
-    );
-
-    return havePosition.mean() * 100;
+  private computeExposureTime(barCount: number, tradeLog: TradeLogRow[]): number {
+    /* istanbul ignore if */
+    if (barCount === 0) return 0;
+    const havePosition = new Array<number>(barCount).fill(0);
+    for (const t of tradeLog) {
+      const entryBar = t[TradeLogColumn.EntryBar];
+      /* istanbul ignore next */
+      const exitBar = t[TradeLogColumn.ExitBar] ?? barCount - 1;
+      for (let i = entryBar; i <= exitBar; i++) {
+        havePosition[i] = 1;
+      }
+    }
+    return mean(havePosition) * 100;
   }
 
-  private computeReturnPct(values: Series) {
-    const finalValue = values.iat(values.size - 1) as number;
-    const initialValue = values.iat(0) as number;
-    return (finalValue - initialValue) / initialValue * 100;
+  private computeReturnPct(values: number[]): number {
+    const finalValue = values[values.length - 1];
+    const initialValue = values[0];
+    return ((finalValue - initialValue) / initialValue) * 100;
   }
 
-  private computeDrawdownDurationPeaks(drawdown: Series) {
-    // @ts-ignore
-    const iloc = uniq([ ...drawdown.eq(0).values.reduce((arr, v, i) => v ? [ ...arr, i ] : arr, []), drawdown.index.length - 1]);
-    const prev = [ NaN, ...iloc.slice(0, -1) ];
-    const df = new DataFrame({ iloc, prev });
-
-    // @ts-ignore
-    df.query(df['iloc'].gt(df['prev'].add(1)), { inplace: true });
-
-    // @ts-ignore
-    df.setIndex({ index: df['iloc'].values.map(i => drawdown.index[i]), inplace: true })
-
-    if (!df.size) {
-      const nan = new Series(Array(drawdown.count()).fill(NaN))
-      return [ nan, nan ];
+  private computeDrawdownDurationPeaks(
+    drawdown: number[],
+    dateIndex: string[],
+  ): [number[], number[]] {
+    const zeros: number[] = [];
+    for (let i = 0; i < drawdown.length; i++) {
+      if (drawdown[i] === 0) zeros.push(i);
+    }
+    if (drawdown.length > 0 && zeros[zeros.length - 1] !== drawdown.length - 1) {
+      zeros.push(drawdown.length - 1);
     }
 
-    df.addColumn('duration', df.values.map((row, i) => {
-      const [ iloc, prev ] = row as number[];
-      const start = DateTime.fromISO(drawdown.index[prev] as string);
-      const end = DateTime.fromISO(drawdown.index[iloc] as string);
-      return end.diff(start, 'days').get('days');
-    }), { inplace: true });
+    type Interval = { iloc: number; prev: number };
+    const intervals: Interval[] = [];
+    for (let k = 1; k < zeros.length; k++) {
+      const iloc = zeros[k];
+      const prev = zeros[k - 1];
+      if (iloc > prev + 1) intervals.push({ iloc, prev });
+    }
 
-    // @ts-ignore
-    df.addColumn('peaks', df.apply(([iloc, prev, duration]) =>
-      drawdown.iloc(Array.from({ length: (iloc - prev) + 1 }, (v, k) => k + prev)).max(), { axis: 1 },
-    ), { inplace: true });
+    const ddDur = new Array<number>(drawdown.length).fill(NaN);
+    const ddPeaks = new Array<number>(drawdown.length).fill(NaN);
 
-    const ddDur = new Series(drawdown.index.map(i => df.index.includes(i) ? df.at(i, 'duration') : NaN));
-    const ddPeaks = new Series(drawdown.index.map(i => df.index.includes(i) ? df.at(i, 'peaks') : NaN));
+    if (intervals.length === 0) {
+      return [ddDur, ddPeaks];
+    }
 
-    return [ ddDur, ddPeaks ];
-  }
-
-  private computeDayReturns(returns: Series) {
-    const index = returns.index as string[];
-
-    const iloc = index.reduce((iloc, d, i) => {
-      if (i > 0) {
-        const prev = DateTime.fromISO(returns.index[i - 1] as string).toISODate();
-        const current = DateTime.fromISO(d as string).toISODate();
-        /* istanbul ignore next */
-        if (current === prev) iloc[i - 1] = NaN;
+    for (const { iloc, prev } of intervals) {
+      const start = DateTime.fromISO(dateIndex[prev]);
+      const end = DateTime.fromISO(dateIndex[iloc]);
+      const duration = end.diff(start, 'days').get('days');
+      let peak = Number.NEGATIVE_INFINITY;
+      for (let j = prev; j <= iloc; j++) {
+        if (drawdown[j] > peak) peak = drawdown[j];
       }
-      return [ ...iloc, i ];
-    }, [] as number[]).filter(v => !isNaN(v));
+      ddDur[iloc] = duration;
+      ddPeaks[iloc] = peak;
+    }
 
-    const returnsByDate = returns.iloc(iloc);
-    const returnValues = returnsByDate.values as number[];
-    const dayReturns = new Series(returnValues.map((_, i) =>
-      (i === 0) ? 0 : (returnValues[i] - returnValues[i - 1]) / returnValues[i - 1],
-    ), { index: returnsByDate.index });
-
-    return dayReturns;
+    return [ddDur, ddPeaks];
   }
 
-  private computeGeometricMean(returns: Series) {
-    returns = returns.fillNa(0).add(1) as Series;
-    /* istanbul ignore next */
-    if (returns.values.some(v => v <= 0)) return 0;
-    /* istanbul ignore next */
-    return Math.exp(returns.apply(v => Math.log(v)).sum() / (returns.values.length || 0)) - 1;
+  private computeDayReturns(equity: number[], dateIndex: string[]): number[] {
+    const filteredIndices: number[] = [];
+    for (let i = 0; i < dateIndex.length; i++) {
+      if (i > 0) {
+        const prevDate = DateTime.fromISO(dateIndex[i - 1]).toISODate();
+        const curDate = DateTime.fromISO(dateIndex[i]).toISODate();
+        /* istanbul ignore if */
+        if (curDate === prevDate) filteredIndices.pop();
+      }
+      filteredIndices.push(i);
+    }
+    const filteredValues = filteredIndices.map(i => equity[i]);
+    return filteredValues.map((v, i) =>
+      i === 0 ? 0 : (v - filteredValues[i - 1]) / filteredValues[i - 1],
+    );
   }
 
-  private foramt(value: number) {
+  private format(value: number): number {
     const { precision = 12, digits = 6 } = this.options;
-    return Math.round(parseFloat(value.toPrecision(precision)) * Math.pow(10, digits)) / Math.pow(10, digits);
+    return (
+      Math.round(parseFloat(value.toPrecision(precision)) * Math.pow(10, digits)) /
+      Math.pow(10, digits)
+    );
   }
 }
+

@@ -45,7 +45,7 @@ export class Position {
   /**
    * Close portion of position by closing `portion` of each active trade.
    */
-  public close(portion: number = 1) {
+  public close(portion = 1) {
     this.broker.trades.forEach(trade => trade.close(portion));
   }
 }
