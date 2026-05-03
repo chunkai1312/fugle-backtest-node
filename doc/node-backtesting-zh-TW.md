@@ -1,4 +1,4 @@
-# @fugle/backtest
+# node-backtesting
 
 ## 目錄
 
@@ -87,10 +87,23 @@
 ### `backtest.optimize(options)`
 
 - `options` {Object}
-  - `params` {Record<string, number[]>} 交易策略的參數組合。
-- 回傳：{Promise} 成功時將使用 `Stats` 履行。
+  - `params` {Record<string, number[]>} 參數網格；每個 key 對應候選值陣列。
+  - `constraint` {(params) => boolean} _選填。_ 過濾組合；僅執行 `constraint(p) === true` 的組合。
+  - `maxTries` {number} _選填。_ 限制執行的組合數；若展開後超過此值會從有效組合中均勻無放回抽樣。`method === 'random'` 時為必填。
+  - `maximize` {StatsIndex | (results) => number} _選填。_ 用於排序的指標 key 或評分函式，預設 `'Equity Final [$]'`。
+  - `max` {StatsIndex} _選填，已棄用。_ `maximize` 的舊別名，與 `maximize` 同時提供會拋 `TypeError`。
+  - `method` {'grid' | 'random'} _選填。_ `'grid'`（預設）跑遍所有組合（除非 `maxTries` 限制）；`'random'` 一律抽樣，需要 `maxTries`。
+  - `seed` {number} _選填。_ 隨機抽樣的 PRNG seed。預設為 `Date.now()`。
+  - `returnHeatmap` {boolean} _選填。_ 為 `true` 時回傳結果附帶 `heatmap`（前兩個 `params` key 的 2D 熱力圖）；`params` 不足 2 個 key 時拋錯。
+  - `returnAll` {boolean} _選填。_ 為 `true` 時回傳結果附帶 `all`，包含每個執行組合的 params / score / stats。
+- 回傳：{Promise<OptimizeResult>}
+  - `best` {Stats} 最高分組合的統計。
+  - `bestParams` {Record<string, number>} 勝出的參數組合。
+  - `bestScore` {number} 對應 `maximize` 的分數。
+  - `heatmap` {ParamHeatmap} _選填。_ 僅當 `returnHeatmap === true` 時出現。
+  - `all` {Array<{ params, score, stats }>} _選填。_ 僅當 `returnAll === true` 時出現。
 
-最佳化交易策略的參數。
+最佳化策略參數。`Backtest.stats` 會被設為 `result.best`，因此 `print()` / `plot()` 在 `optimize()` 後仍可使用。
 
 ### `backtest.print()`
 
@@ -151,18 +164,28 @@
 
 下單賣出。
 
-### `strategy.addIndicator(name, values)`
+### `strategy.addIndicator(name, values[, options])`
 
 - `name` {string} 指標名稱。
-- `values` {number[] | Record<string, number>[]} 指標值。
+- `values` {number[] | Record<string, number>[]} 指標值；短於 `data.length` 時左側以 `null` 補齊。
+- `options` {Object} _選填。_ 提供給 `Plotting` 的繪製提示。
+  - `overlay` {boolean} — `true`（預設）將指標畫在價格面板；`false` 則放在獨立副圖。
+  - `color` {string} — Plotly 線條顏色（任何 CSS 顏色字串）。
 
-新增一個指標。
+新增一個指標。繪圖選項與指標值分開儲存，`getIndicator()` 仍只回傳值。
 
 ### `strategy.getIndicator(name)`
 
 - `name` {string} 指標名稱。
 
-按名稱取得指標。
+按名稱取得指標值。
+
+### `strategy.getIndicatorOptions(name)`
+
+- `name` {string} 指標名稱。
+- 回傳：`{ overlay: boolean; color: string } | undefined`
+
+取得 `addIndicator()` 提供的繪圖選項；若名稱不存在回 `undefined`。
 
 ### `strategy.addSignal(name, values)`
 
@@ -179,9 +202,9 @@
 
 ### `strategy.data`
 
-- {danfo.DataFrame}
+- {HistoricalData}
 
-取得歷史Ｋ線數據的 DataFrame。
+取得欄式歷史 OHLCV 數據。每個欄位（如 `date / open / high / low / close / volume`）皆可透過屬性與字串索引存取，且 `strategy.data.close === strategy.data['close']`，型別為 `number[]`（`date` 為 `string[]`）。
 
 ### `strategy.equity`
 
@@ -412,3 +435,79 @@
 ### trade.close()
 
 下達新的委託單（`Order`）並按照下一個市場價格關閉部分（`portion`）交易。
+
+### trade.isTrailing
+
+- {boolean}
+
+若該交易以 `trailPercent` 或 `trailAmount` 開倉且 trailing 尚未被停用（例如被指派固定 `trade.sl = price`），回 `true`。
+
+### trade.trailPercent
+
+- {number | undefined}
+
+以百分比表示的移動停損距離；非 trailing 模式時為 `undefined`。
+
+### trade.trailAmount
+
+- {number | undefined}
+
+以絕對價差表示的移動停損距離；非 trailing 模式時為 `undefined`。
+
+### trade.trailingDistance
+
+- {number | undefined}
+
+當前 trailing 峰值（多 = `peakHigh`、空 = `peakLow`）與目前 SL 價格的絕對距離。非 trailing 或尚未建立 SL 時為 `undefined`。
+
+## 委託單 trailing 選項
+
+`OrderOptions` 在既有的 `slPrice / tpPrice / limitPrice / stopPrice` 之外，另接受：
+
+- `trailPercent` {number} — 以百分比表示的 trailing 距離（如 `0.05` 表示 5%），需符合 `0 < trailPercent < 1`。
+- `trailAmount` {number} — 以絕對價格表示的 trailing 距離，需 `> 0`。
+
+兩者同時提供會拋 `TypeError`。對應的 `Trade` 會在每根 bar 朝有利方向更新 SL（多 = `peakHigh * (1 - trailPercent)`、空 = `peakLow * (1 + trailPercent)`），絕不反向。
+
+## 策略輔助函式
+
+從套件根目錄匯出的純函式，可在 `Strategy.init()` / `next()` 中使用。
+
+### crossover(a, b)
+
+- `a` {number[]}
+- `b` {number[]}
+- 回傳：{boolean[]} — 長度與輸入相同。
+
+當 `a[i] > b[i]` 且 `a[i-1] <= b[i-1]` 時於該索引回 `true`。索引 `0` 永遠為 `false`。當前或前一根 bar 的值若為 non-finite（`NaN`、`null`、`undefined`、`±Infinity`）會將結果 gate 為 `false`。長度不一致時拋 `TypeError`。
+
+### crossunder(a, b)
+
+`crossover` 的對應下穿版本：當 `a[i] < b[i]` 且 `a[i-1] >= b[i-1]` 時回 `true`。
+
+### lookback(series, i, n)
+
+- `series` {T[]}
+- `i` {number} — 當前 bar 索引
+- `n` {number} — 回看的 bar 數，需 ≥ 0
+- 回傳：{T | undefined}
+
+回傳 `series[i - n]`，索引越界時回 `undefined`。`n` 為負時拋 `RangeError`。
+
+### barsSince(condition, i)
+
+- `condition` {boolean[]}
+- `i` {number}
+- 回傳：{number}
+
+`i` 與 `condition[0..i]` 中最近一個 `true` 之間的 bar 數。若 `condition[i]` 為 `true` 回 `0`；若 `[0..i]` 範圍內均為 `false` 回 `Infinity`。
+
+### resampleApply(dates, values, rule, fn)
+
+- `dates` {string[]} — 與 `values` 對齊的 ISO 8601 日期
+- `values` {number[]}
+- `rule` {'W' | 'M' | 'Q' | 'Y'}
+- `fn` {(bucket: number[]) => number}
+- 回傳：{number[]}
+
+依 ISO 週 / 月 / 季 / 年將 `(dates, values)` 分桶，對每桶套用 `fn` 取得單一聚合值，再 forward-fill 回每個落在該桶的原始索引。輸入長度不一致時拋 `TypeError`。

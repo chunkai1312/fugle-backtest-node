@@ -1,4 +1,4 @@
-# @fugle/backtest
+# node-backtesting
 
 ## Table of Contents
 
@@ -87,10 +87,23 @@ Run the backtest for the strategy.
 ### `backtest.optimize(options)`
 
 - `options` {Object}
-  - `params` {Record<string, number[]>} The combination of parameters for the trading strategy.
-- Returns: {Promise} Fulfills with `Stats` results upon success.
+  - `params` {Record<string, number[]>} The parameter grid; each key maps to the candidate values for that parameter.
+  - `constraint` {(params) => boolean} _optional._ Filter combinations; only those returning `true` are executed.
+  - `maxTries` {number} _optional._ Cap on combinations executed; if the cartesian expansion exceeds this, a uniform-random sample (without replacement) is drawn. Required when `method === 'random'`.
+  - `maximize` {StatsIndex | (results) => number} _optional._ Stats key (string) or scoring function used to rank combinations. Default `'Equity Final [$]'`.
+  - `max` {StatsIndex} _optional, deprecated._ Alias for `maximize`. Supplying both throws `TypeError`.
+  - `method` {'grid' | 'random'} _optional._ `'grid'` (default) runs every combination unless capped by `maxTries`; `'random'` always samples and requires `maxTries`.
+  - `seed` {number} _optional._ PRNG seed for deterministic random sampling. Defaults to `Date.now()`.
+  - `returnHeatmap` {boolean} _optional._ When `true`, the result includes a 2D `heatmap` of the first two `params` keys. Throws if `params` has fewer than 2 keys.
+  - `returnAll` {boolean} _optional._ When `true`, the result includes `all` — every executed combination's params, score, and stats.
+- Returns: {Promise<OptimizeResult>}
+  - `best` {Stats} The highest-scoring `Stats` instance.
+  - `bestParams` {Record<string, number>} The parameter combination that produced `best`.
+  - `bestScore` {number} The score (per `maximize`) of `best`.
+  - `heatmap` {ParamHeatmap} _optional._ Present only when `returnHeatmap === true`.
+  - `all` {Array<{ params, score, stats }>} _optional._ Present only when `returnAll === true`.
 
-Optimize strategy parameters.
+Optimize strategy parameters across a parameter grid. `Backtest.stats` is set to `result.best` so `print()` / `plot()` continue to work after `optimize()`.
 
 ### `backtest.print()`
 
@@ -151,18 +164,28 @@ Place a new long order.
 
 Place a new short order.
 
-### `strategy.addIndicator(name, values)`
+### `strategy.addIndicator(name, values[, options])`
 
 - `name` {string} The indicator name.
-- `values` {number[] | Record<string, number>[]} The values of the indicator.
+- `values` {number[] | Record<string, number>[]} The values of the indicator. Shorter-than-data arrays are left-padded with `null`.
+- `options` {Object} _optional._ Plotting hints consumed by `Plotting`.
+  - `overlay` {boolean} — `true` (default) draws the indicator on the price panel; `false` puts it in its own subplot.
+  - `color` {string} — Plotly line color (any CSS color string).
 
-Add an indicator.
+Add an indicator. Plotting options are stored separately from the values; `getIndicator()` continues to return only the values.
 
 ### `strategy.getIndicator(name)`
 
 - `name` {string} The indicator name.
 
-Get indicator by name.
+Get indicator values by name.
+
+### `strategy.getIndicatorOptions(name)`
+
+- `name` {string} The indicator name.
+- Returns: `{ overlay: boolean; color: string } | undefined`
+
+Get the indicator's plotting options as supplied to `addIndicator()`. Returns `undefined` for unknown names.
 
 ### `strategy.addSignal(name, values)`
 
@@ -179,9 +202,9 @@ Get signal by name.
 
 ### `strategy.data`
 
-- {danfo.DataFrame}
+- {HistoricalData}
 
-Get the DataFrame of the historical candles data.
+Get the columnar historical OHLCV data. Columns are accessible as both properties and bracket-keys (e.g. `strategy.data.close === strategy.data['close']`); each column is a `number[]` (or `string[]` for `date`).
 
 ### `strategy.equity`
 
@@ -409,3 +432,79 @@ Take-profit price at which to close the trade.
 ### trade.close()
 
 Place new `Order` to close `portion` of the trade at next market price.
+
+### trade.isTrailing
+
+- {boolean}
+
+`true` if the trade was opened with `trailPercent` or `trailAmount` and trailing has not been disabled (e.g. via fixed `trade.sl = price` assignment).
+
+### trade.trailPercent
+
+- {number | undefined}
+
+Trailing stop distance as a fraction of price, or `undefined` if not in trailing mode.
+
+### trade.trailAmount
+
+- {number | undefined}
+
+Trailing stop distance as an absolute price-unit difference, or `undefined` if not in trailing mode.
+
+### trade.trailingDistance
+
+- {number | undefined}
+
+Absolute distance between the current trailing peak (`peakHigh` for long, `peakLow` for short) and the active SL price. `undefined` when not trailing or no SL has been established yet.
+
+## Order trailing options
+
+In addition to `slPrice` / `tpPrice` / `limitPrice` / `stopPrice`, `OrderOptions` accepts:
+
+- `trailPercent` {number} — trailing distance as a fraction of price (e.g. `0.05` for 5%). Must satisfy `0 < trailPercent < 1`.
+- `trailAmount` {number} — trailing distance in absolute price units. Must be `> 0`.
+
+Supplying both throws `TypeError`. The resulting `Trade` ratchets its SL toward the favorable direction every bar (`peakHigh * (1 - trailPercent)` for long, `peakLow * (1 + trailPercent)` for short) and never moves backward.
+
+## Strategy helpers
+
+Pure functions exported from the package root for use inside `Strategy.init()` / `next()`.
+
+### crossover(a, b)
+
+- `a` {number[]}
+- `b` {number[]}
+- Returns: {boolean[]} — same length as inputs.
+
+`true` at index `i` when `a[i] > b[i]` and `a[i-1] <= b[i-1]`. Index `0` is always `false`. Non-finite values (`NaN`, `null`, `undefined`, `±Infinity`) at the current or previous bar gate the result to `false`. Throws `TypeError` on length mismatch.
+
+### crossunder(a, b)
+
+Mirror of `crossover` for the down side: `true` when `a[i] < b[i]` and `a[i-1] >= b[i-1]`.
+
+### lookback(series, i, n)
+
+- `series` {T[]}
+- `i` {number} — current bar index
+- `n` {number} — bars to look back; must be non-negative
+- Returns: {T | undefined}
+
+Returns `series[i - n]`, or `undefined` if the target index is out of bounds. Throws `RangeError` for negative `n`.
+
+### barsSince(condition, i)
+
+- `condition` {boolean[]}
+- `i` {number}
+- Returns: {number}
+
+Number of bars between `i` and the most recent `true` in `condition[0..i]`. `0` if `condition[i]` is `true`; `Infinity` if no `true` exists in that range.
+
+### resampleApply(dates, values, rule, fn)
+
+- `dates` {string[]} — ISO 8601 dates aligned to `values`
+- `values` {number[]}
+- `rule` {'W' | 'M' | 'Q' | 'Y'}
+- `fn` {(bucket: number[]) => number}
+- Returns: {number[]}
+
+Buckets `(dates, values)` by the calendar period (ISO week / month / quarter / year), applies `fn` per bucket to produce one aggregated value, and forward-fills the result back onto every original index whose date falls in that bucket. Throws `TypeError` when input lengths differ.
