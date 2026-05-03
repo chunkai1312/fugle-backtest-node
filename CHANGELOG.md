@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+## [1.0.0](https://github.com/chunkai1312/node-backtesting/compare/v0.2.0...v1.0.0) (2026-05-03)
+
+
+### Features
+
+* add trailing stop support ([68cad7f](https://github.com/chunkai1312/node-backtesting/commit/68cad7f38cdb3d2483557ad7e1b71eb3bddff6f0))
+* enhance optimize with random sampling, heatmap, and return runs ([e203ce7](https://github.com/chunkai1312/node-backtesting/commit/e203ce7b87affd0f5f82a248aa1cd015136c4010))
+* replace danfojs-node with custom HistoricalData class and utility functions ([9893d3b](https://github.com/chunkai1312/node-backtesting/commit/9893d3b13aa1846e5d274744d5adbcb08d09d4ce))
+* rewrite plotting with Plotly multi-panel and indicator overlay support ([9e39643](https://github.com/chunkai1312/node-backtesting/commit/9e396435a2890b500543f2055463524bc343ef69))
+
 ## [0.2.0](https://github.com/fugle-dev/fugle-backtest-node/compare/v0.1.1...v0.2.0) (2025-01-17)
 
 
