@@ -1,6 +1,10 @@
 node_modules
 lib
 coverage
+openspec
 .idea
 .vscode
+.claude
+.codex
+.github
 .DS_Store
