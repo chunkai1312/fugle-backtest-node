@@ -10,16 +10,34 @@ export class Order {
   private _stopPrice?: number;
   private _slPrice?: number;
   private _tpPrice?: number;
+  private _trailPercent?: number;
+  private _trailAmount?: number;
   private _parentTrade?: Trade;
   private _tag?: Record<string, string>;
 
   constructor(private readonly broker: Broker, options: OrderOptions) {
     assert(options.size !== 0);
+    if (options.trailPercent !== undefined && options.trailAmount !== undefined) {
+      throw new TypeError('Provide either trailPercent or trailAmount, not both');
+    }
+    if (options.trailPercent !== undefined) {
+      if (!(options.trailPercent > 0)) {
+        throw new RangeError('trailPercent must be > 0');
+      }
+      if (!(options.trailPercent < 1)) {
+        throw new RangeError('trailPercent must be in (0, 1)');
+      }
+    }
+    if (options.trailAmount !== undefined && !(options.trailAmount > 0)) {
+      throw new RangeError('trailAmount must be > 0');
+    }
     this._size = options.size;
     this._limitPrice = options.limitPrice;
     this._stopPrice = options.stopPrice;
     this._slPrice = options.slPrice;
     this._tpPrice = options.tpPrice;
+    this._trailPercent = options.trailPercent;
+    this._trailAmount = options.trailAmount;
     this._parentTrade = options.parentTrade;
     this._tag = options.tag;
   }
@@ -70,6 +88,20 @@ export class Order {
    */
   get tp() {
     return this._tpPrice;
+  }
+
+  /**
+   * Trailing stop distance as a fraction of price (e.g. `0.05` for 5%).
+   */
+  get trailPercent(): number | undefined {
+    return this._trailPercent;
+  }
+
+  /**
+   * Trailing stop distance as an absolute price-unit difference.
+   */
+  get trailAmount(): number | undefined {
+    return this._trailAmount;
   }
 
   get parentTrade() {
