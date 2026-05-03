@@ -1,5 +1,5 @@
 {
-  "name": "@fugle/backtest",
+  "name": "node-backtesting",
   "version": "0.2.0",
   "description": "Backtest trading strategies in Node.js",
   "main": "lib/index.js",
@@ -11,6 +11,7 @@
     "test:watch": "jest --watch",
     "test:cov": "jest --coverage",
     "lint": "eslint '{src,test}/**/*.ts' --fix",
+    "example": "yarn build && ts-node",
     "release": "standard-version"
   },
   "files": [
@@ -18,21 +19,19 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/fugle-dev/fugle-backtest-node.git"
+    "url": "git+https://github.com/chunkai1312/node-backtesting.git"
   },
   "keywords": [
-    "fugle",
     "backtest",
-    "fugle-backtest-node",
-    "backtesting"
+    "backtesting",
+    "node-backtesting"
   ],
   "license": "MIT",
   "bugs": {
-    "url": "https://github.com/fugle-dev/fugle-backtest-node/issues"
+    "url": "https://github.com/chunkai1312/node-backtesting/issues"
   },
-  "homepage": "https://github.com/fugle-dev/fugle-backtest-node#readme",
+  "homepage": "https://github.com/chunkai1312/node-backtesting#readme",
   "dependencies": {
-    "danfojs-node": "^1.1.2",
     "html-minifier": "^4.0.0",
     "lodash": "^4.17.21",
     "luxon": "^3.2.1",
